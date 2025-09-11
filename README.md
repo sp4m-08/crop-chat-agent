@@ -1,24 +1,3 @@
-### Project Structure
-
-crop-chatbot-backend/
-├── fastapi_app/
-│ ├── **init**.py
-│ ├── agents/
-│ │ ├── **init**.py
-│ │ ├── agent_roles.py
-│ │ └── orchestrator.py
-│ ├── models/
-│ │ ├── **init**.py
-│ │ └── sensor_data.py
-│ ├── routes/
-│ │ ├── **init**.py
-│ │ └── chat.py
-│ └── main.py
-├── requirements.txt
-└── venv/
-
----
-
 ### Project Documentation: The LLM Multi-Agent Crop/Farmer Chatbot
 
 This document provides a comprehensive overview of the `Crop-Chatbot` project, a multi-agent system designed to assist farmers by analyzing sensor data and providing actionable agricultural advice.
