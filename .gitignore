@@ -1,0 +1,81 @@
+Byte-compiled / optimized / DLL files
+pycache/
+*.py[cod]
+*$py.class
+
+C extensions
+*.so
+
+Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+PyInstaller
+Usually these files are written by a python script from a template
+before it is build into an exe with PyInstaller.
+They are not real python files.
+https://www.google.com/search?q=https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/DynamicLibraries/articles/rpath.html
+*.spec
+_config.py
+_rpath.py
+
+Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+Unit test / coverage reports
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+.cache
+.hypothesis/
+.nox/
+
+Translations
+*.mo
+*.pot
+
+Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+
+Flask stuff:
+instance/
+.webassets-cache
+
+Scrapy stuff:
+.scrapy
+
+Sphinx documentation
+docs/_build/
+
+Jupyter Notebook
+.ipynb_checkpoints
+
+IPython
+profile_default/
+ipython_config.py
+
+Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+VS Code files
+.vscode/
+
+Project-specific files
+*.env
