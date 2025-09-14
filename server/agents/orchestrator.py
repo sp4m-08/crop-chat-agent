@@ -4,7 +4,7 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from .agent_roles import llm
-from tools.profile_tool import get_farmer_profile
+from .tools.profile_tool import get_farmer_profile
 from .tools.sensor_tool import get_latest_sensor_data
 from .tools.weather_tool import get_local_weather
 
