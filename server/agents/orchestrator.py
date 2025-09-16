@@ -4,7 +4,7 @@ import operator
 import re
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import SystemMessage, HumanMessage
-from ..utils.response_cleaner import clean_response, format_weather ,format_market_price
+from ..utils.response_cleaner import clean_response, format_weather, format_market_price
 from .agent_roles import llm
 from .tools.profile_tool import get_farmer_profile
 from .tools.sensor_tool import get_latest_sensor_data
@@ -17,7 +17,8 @@ class State(TypedDict, total=False):
     user_id: str
     session_id: str
     message: str
-    intent: List[str] 
+    intent: List[str]
+    query_crop: Optional[str]
     history: List[Dict[str, Any]]
     history_summary: str
     profile: Dict[str, Any]
@@ -47,13 +48,24 @@ async def chat_history_node(state: State) -> State:
     }
 
 async def farmer_interaction_node(state: State) -> State:
+    # Detect intents
     prompt = [
-    SystemMessage(content="You triage farmer queries. Output all relevant intents separated by commas: status, weather, disease, plan, advice, market, price."),
-    HumanMessage(content=f"User message: {state['message']}"),
-]
+        SystemMessage(content="You triage farmer queries. Output all relevant intents separated by commas: status, weather, disease, plan, advice, market, price."),
+        HumanMessage(content=f"User message: {state['message']}"),
+    ]
     resp = await llm.ainvoke(prompt)
     intents = [i.strip() for i in resp.content.lower().split(",") if i.strip()]
-    return {"intent": intents, **_trace(f"intent={intents}")}
+
+    # Try to extract crop from user query
+    crop_prompt = [
+        SystemMessage(content="Extract the crop name from the following user message. If none, reply 'none'."),
+        HumanMessage(content=state["message"])
+    ]
+    crop_resp = await llm.ainvoke(crop_prompt)
+    crop_query = crop_resp.content.strip().lower()
+    crop_query = None if crop_query == "none" else crop_query
+
+    return {"intent": intents, "query_crop": crop_query, **_trace(f"intent={intents}, crop={crop_query}")}
 
 async def farmer_profile_node(state: State) -> State:
     profile = await get_farmer_profile(state["user_id"])
@@ -71,7 +83,7 @@ async def weather_node(state: State) -> State:
 async def crop_health_node(state: State) -> State:
     profile = state.get("profile", {})
     crops = profile.get("crops", [])
-    crop = crops[0] if crops else "unknown crop"
+    crop = state.get("query_crop") or (crops[0] if crops else "unknown crop")
     sensors = state.get("sensors", {})
     sys = (
         "You are an expert agronomist. From your knowledge, infer ideal environmental ranges "
@@ -89,8 +101,9 @@ async def crop_health_node(state: State) -> State:
     return {"crop_analysis": resp.content, **_trace("crop_analysis")}
 
 async def disease_prediction_node(state: State) -> State:
-    crops = (state.get("profile") or {}).get("crops", [])
-    crop = crops[0] if crops else "unknown crop"
+    profile = state.get("profile", {})
+    crops = profile.get("crops", [])
+    crop = state.get("query_crop") or (crops[0] if crops else "unknown crop")
     sensors = state.get("sensors", {})
     weather = state.get("weather", {})
     sys = "Plant pathologist. Estimate near-term disease risks and preventive actions."
@@ -103,15 +116,25 @@ async def disease_prediction_node(state: State) -> State:
 
 async def agmarket_price_node(state: State) -> State:
     """
-    Node to let LLM extract state and market from the farmer profile's location for price lookup.
+    Node to extract state and market for agri market price lookup.
+    Uses location from user query if present, else profile location.
+    Uses crop from user query if present, else profile crop.
     """
     profile = state.get("profile", {})
-    location = profile.get("location", "")
-    crop = profile.get("crops", ["wheat"])[0]
+    # Try to extract location from user query using LLM
+    location_prompt = [
+        SystemMessage(content="Extract the location (city or market and state) from the following user message. If none, reply 'none'."),
+        HumanMessage(content=state["message"])
+    ]
+    location_resp = await llm.ainvoke(location_prompt)
+    location_query = location_resp.content.strip()
+    location = location_query if location_query.lower() != "none" else profile.get("location", "")
+
+    crop = state.get("query_crop") or profile.get("crops", ["wheat"])[0]
 
     # Prompt LLM to extract state and market from location string only
     sys = (
-        "Extract the state and market from the following location string. "
+        "Extract the market and state from the following location string. "
         "Reply in the format: Market: <market>, State: <state>"
     )
     user = f"Location: {location}"
@@ -125,14 +148,13 @@ async def agmarket_price_node(state: State) -> State:
         market_name, state_name = "chennai", "Tamil nadu"  # fallback
 
     price_data = await get_agri_market_price(crop, state_name.strip(), market_name.strip())
-    return {"market_price": price_data, **_trace("market_price")}
-
+    return {"market_price": price_data, **_trace(f"market_price for {crop} at {market_name}, {state_name}")}
 
 
 async def lifecycle_planning_node(state: State) -> State:
     profile = state.get("profile", {})
     crops = profile.get("crops", [])
-    crop = crops[0] if crops else "unknown crop"
+    crop = state.get("query_crop") or (crops[0] if crops else "unknown crop")
     weather = state.get("weather", {})
     sys = "You prepare seasonal crop operation plans."
     user = (
@@ -190,7 +212,6 @@ async def response_synthesizer_node(state: State) -> State:
     final_cleaned = clean_response(final)
     await save_chat_turn(state["user_id"], state["session_id"], msg, final_cleaned)
     return {"final_response": final_cleaned, **_trace("final")}
-
 
 # ------------ Build and run the graph ------------
 def _build_graph():
