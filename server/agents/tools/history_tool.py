@@ -1,32 +1,19 @@
 from typing import List, Dict, Any
-from datetime import datetime, timezone
-from ...services.mongo_client import get_db
 
-COLL = "chat_history"
+# Simple in-memory store (global variable)
+_chat_history_store: Dict[str, List[Dict[str, Any]]] = {}
 
 async def get_chat_history(user_id: str, session_id: str, limit: int = 20) -> List[Dict[str, Any]]:
-    db = get_db()
-    cursor = (
-        db[COLL]
-        .find({"user_id": user_id, "session_id": session_id})
-        .sort("ts", -1)
-        .limit(limit)
-    )
-    docs = [d async for d in cursor]
-    docs.reverse()
-    return [{"role": d["role"], "content": d["content"], "ts": d["ts"]} for d in docs]
+    key = f"{user_id}:{session_id}"
+    return _chat_history_store.get(key, [])[-limit:]
 
-async def save_chat_turn(user_id: str, session_id: str, user_message: str, assistant_message: str) -> None:
-    db = get_db()
-    ts = datetime.now(timezone.utc)
-    await db[COLL].insert_many([
-        {"user_id": user_id, "session_id": session_id, "role": "user", "content": user_message, "ts": ts},
-        {"user_id": user_id, "session_id": session_id, "role": "assistant", "content": assistant_message, "ts": ts},
-    ])
+async def save_chat_turn(user_id: str, session_id: str, user_msg: str, agent_msg: str):
+    key = f"{user_id}:{session_id}"
+    turn = {"user": user_msg, "agent": agent_msg}
+    if key not in _chat_history_store:
+        _chat_history_store[key] = []
+    _chat_history_store[key].append(turn)
 
 def render_history_for_prompt(history: List[Dict[str, Any]]) -> str:
-    lines = []
-    for h in history:
-        role = "Farmer" if h["role"] == "user" else "Assistant"
-        lines.append(f"{role}: {h['content']}")
-    return "\n".join(lines[-20:])
+    # Simple rendering for LLM prompt
+    return "\n".join([f"User: {h['user']}\nAgent: {h['agent']}" for h in history])
