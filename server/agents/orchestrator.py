@@ -4,19 +4,20 @@ import operator
 import re
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import SystemMessage, HumanMessage
-from ..utils.response_cleaner import clean_response
+from ..utils.response_cleaner import clean_response, format_weather ,format_market_price
 from .agent_roles import llm
 from .tools.profile_tool import get_farmer_profile
 from .tools.sensor_tool import get_latest_sensor_data
 from .tools.weather_tool import get_local_weather
 from .tools.history_tool import get_chat_history, save_chat_turn, render_history_for_prompt
 from .tools.market_tool import get_agri_market_price
+
 # ------------ Shared state passed between nodes ------------
 class State(TypedDict, total=False):
     user_id: str
     session_id: str
     message: str
-    intent: str
+    intent: List[str] 
     history: List[Dict[str, Any]]
     history_summary: str
     profile: Dict[str, Any]
@@ -47,12 +48,12 @@ async def chat_history_node(state: State) -> State:
 
 async def farmer_interaction_node(state: State) -> State:
     prompt = [
-        SystemMessage(content="You triage farmer queries. Output only one intent: status | weather | disease | plan | advice."),
-        HumanMessage(content=f"User message: {state['message']}"),
-    ]
+    SystemMessage(content="You triage farmer queries. Output all relevant intents separated by commas: status, weather, disease, plan, advice, market, price."),
+    HumanMessage(content=f"User message: {state['message']}"),
+]
     resp = await llm.ainvoke(prompt)
-    intent = resp.content.strip().lower().split()[0]
-    return {"intent": intent, **_trace(f"intent={intent}")}
+    intents = [i.strip() for i in resp.content.lower().split(",") if i.strip()]
+    return {"intent": intents, **_trace(f"intent={intents}")}
 
 async def farmer_profile_node(state: State) -> State:
     profile = await get_farmer_profile(state["user_id"])
@@ -126,18 +127,7 @@ async def agmarket_price_node(state: State) -> State:
     price_data = await get_agri_market_price(crop, state_name.strip(), market_name.strip())
     return {"market_price": price_data, **_trace("market_price")}
 
-def format_market_price(market_price: Dict[str, Any]) -> str:
-    """
-    Formats the latest market price info for the LLM prompt.
-    """
-    data = market_price.get("data", [])
-    if not data:
-        return "Market price data not available."
-    latest = data[0]
-    return (
-        f"Latest market price for {latest['Commodity']} in {latest['Market']} ({latest['Date']}):\n"
-        f"Min Price: ₹{latest['Min Price']}, Max Price: ₹{latest['Max Price']}, Modal Price: ₹{latest['Modal Price']}"
-    )
+
 
 async def lifecycle_planning_node(state: State) -> State:
     profile = state.get("profile", {})
@@ -155,30 +145,52 @@ async def lifecycle_planning_node(state: State) -> State:
     return {"plan": resp.content, **_trace("plan")}
 
 async def response_synthesizer_node(state: State) -> State:
+    """
+    Synthesizes the final response for the farmer based on detected intents and context parts.
+    Includes market price, weather, crop health, disease, and plan as relevant.
+    """
     msg = state["message"]
-    intent = state.get("intent", "")
+    intent = state.get("intent", [])
     profile = state.get("profile", {})
     market_price_info = format_market_price(state.get("market_price", {}))
+    weather_info = format_weather(state.get("weather", {}))
+    crop_health_info = state.get("crop_analysis", "")
+    disease_info = state.get("disease_risk", "")
+    plan_info = state.get("plan", "")
 
-    # Build context parts based on intent
+    # Build context parts based on detected intents
     parts = {}
-    if "market" in intent or "price" in intent:
+    if any(i in intent for i in ["market", "price"]):
         parts["Market price"] = market_price_info
-    if "health" in intent or "status" in intent:
-        parts["Crop health"] = state.get("crop_analysis", "")
+    if any(i in intent for i in ["weather", "rain"]):
+        parts["Weather"] = weather_info
+    if any(i in intent for i in ["health", "status"]):
+        parts["Crop health"] = crop_health_info
     if "disease" in intent:
-        parts["Disease"] = state.get("disease_risk", "")
+        parts["Disease"] = disease_info
     if "plan" in intent:
-        parts["Plan"] = state.get("plan", "")
-    # Always include history, weather, sensors if you want
+        parts["Plan"] = plan_info
 
-    sys = "Farmer-facing assistant. Reply concisely and only about the user's query. If the user asks about market price, do not include crop health alerts."
-    user = f"User query: {msg}\nFarmer profile: {profile}\nContext parts: {parts}\n<= 180 words."
+    # System prompt to guide the LLM
+    sys = (
+        "Farmer-facing assistant. Reply concisely and only about the user's query. "
+        "If the user asks about market price, do not include crop health alerts. "
+        "If the user asks about weather or rain, use the provided weather data and forecast. "
+        "If multiple topics are asked, answer each clearly."
+    )
+    user = (
+        f"User query: {msg}\n"
+        f"Farmer profile: {profile}\n"
+        f"Context parts: {parts}\n"
+        "<= 180 words."
+    )
+
     resp = await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])
     final = resp.content
     final_cleaned = clean_response(final)
     await save_chat_turn(state["user_id"], state["session_id"], msg, final_cleaned)
     return {"final_response": final_cleaned, **_trace("final")}
+
 
 # ------------ Build and run the graph ------------
 def _build_graph():
