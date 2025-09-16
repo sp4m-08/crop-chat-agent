@@ -1,6 +1,7 @@
 import os
 from fastapi import FastAPI
 from dotenv import load_dotenv
+from fastapi.openapi.utils import get_openapi
 
 load_dotenv()
 
@@ -11,7 +12,18 @@ app = FastAPI(
     description="A multi-agent system to assist farmers with crop management.",
     version="1.0.0",
 )
-
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="Crop/Farmer Chatbot Backend",
+        version="1.0.0",
+        description="A multi-agent system to assist farmers with crop management.",
+        routes=app.routes,
+    )
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+app.openapi = custom_openapi
 app.include_router(chat_router, prefix="/api/v1")
 
 @app.get("/")

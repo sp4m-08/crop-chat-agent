@@ -1,18 +1,20 @@
 from __future__ import annotations
-from typing import TypedDict, Optional, Dict, Any, List
+from typing import TypedDict, Optional, Dict, Any, List, Annotated
+import operator
+import re
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import SystemMessage, HumanMessage
-
+from ..utils.response_cleaner import clean_response
 from .agent_roles import llm
 from .tools.profile_tool import get_farmer_profile
 from .tools.sensor_tool import get_latest_sensor_data
 from .tools.weather_tool import get_local_weather
 from .tools.history_tool import get_chat_history, save_chat_turn, render_history_for_prompt
-
+from .tools.market_tool import get_agri_market_price
 # ------------ Shared state passed between nodes ------------
 class State(TypedDict, total=False):
     user_id: str
-    session_id: str            # add this
+    session_id: str
     message: str
     intent: str
     history: List[Dict[str, Any]]
@@ -23,15 +25,12 @@ class State(TypedDict, total=False):
     crop_analysis: str
     disease_risk: str
     plan: str
+    market_price: Dict[str, Any]
     final_response: str
-    trace: List[str]
+    trace: Annotated[List[str], operator.add]
 
-def _append_trace(state: State, note: str) -> State:
-    t = state.get("trace", [])
-    t.append(note)
-    state["trace"] = t
-    return state
-
+def _trace(note: str) -> Dict[str, Any]:
+    return {"trace": [note]}
 
 # ------------ Nodes (agents) ------------
 async def chat_history_node(state: State) -> State:
@@ -40,10 +39,11 @@ async def chat_history_node(state: State) -> State:
     sys = "Summarize this farmer-assistant chat briefly. Keep goals, crops, and unresolved items. <= 120 words."
     user = history_text or "No prior messages."
     summary = (await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])).content
-    state["history"] = history
-    state["history_summary"] = summary
-    return _append_trace(state, "history_loaded")
-
+    return {
+        "history": history,
+        "history_summary": summary,
+        **_trace("history_loaded")
+    }
 
 async def farmer_interaction_node(state: State) -> State:
     prompt = [
@@ -52,33 +52,26 @@ async def farmer_interaction_node(state: State) -> State:
     ]
     resp = await llm.ainvoke(prompt)
     intent = resp.content.strip().lower().split()[0]
-    
-    state["intent"] = intent         
-    return _append_trace(state, f"intent={intent}") 
+    return {"intent": intent, **_trace(f"intent={intent}")}
 
 async def farmer_profile_node(state: State) -> State:
     profile = await get_farmer_profile(state["user_id"])
-    state["profile"] = profile  # update only profile
-    return _append_trace(state, "profile")
-
+    return {"profile": profile, **_trace("profile")}
 
 async def sensor_data_node(state: State) -> State:
     sensors = await get_latest_sensor_data(state["user_id"])
-    state["sensors"] = sensors
-    return _append_trace(state, "sensors")
+    return {"sensors": sensors, **_trace("sensors")}
 
 async def weather_node(state: State) -> State:
     location = (state.get("profile") or {}).get("location", "Unknown")
     weather = await get_local_weather(location)
-    state["weather"] = weather
-    return _append_trace(state, "weather")
+    return {"weather": weather, **_trace("weather")}
 
 async def crop_health_node(state: State) -> State:
     profile = state.get("profile", {})
     crops = profile.get("crops", [])
     crop = crops[0] if crops else "unknown crop"
     sensors = state.get("sensors", {})
-
     sys = (
         "You are an expert agronomist. From your knowledge, infer ideal environmental ranges "
         "for the specified crop (temperature, humidity, soil moisture, rainfall if relevant). "
@@ -91,14 +84,8 @@ async def crop_health_node(state: State) -> State:
         f"Crop: {crop}\nFarmer context: {profile}\nSensors: {sensors}\n"
         "Output: 3–5 bullets and a line starting with 'Action:'"
     )
-
     resp = await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])
-
-    # Update state in-place
-    state["crop_analysis"] = resp.content
-    return _append_trace(state, "crop_analysis")
-
-
+    return {"crop_analysis": resp.content, **_trace("crop_analysis")}
 
 async def disease_prediction_node(state: State) -> State:
     crops = (state.get("profile") or {}).get("crops", [])
@@ -111,16 +98,52 @@ async def disease_prediction_node(state: State) -> State:
         f"Crop: {crop}\nSensors: {sensors}\nWeather: {weather}"
     )
     resp = await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])
-    state["disease_risk"] = resp.content
-    return _append_trace(state, "disease_risk")
+    return {"disease_risk": resp.content, **_trace("disease_risk")}
 
+async def agmarket_price_node(state: State) -> State:
+    """
+    Node to let LLM extract state and market from the farmer profile's location for price lookup.
+    """
+    profile = state.get("profile", {})
+    location = profile.get("location", "")
+    crop = profile.get("crops", ["wheat"])[0]
+
+    # Prompt LLM to extract state and market from location string only
+    sys = (
+        "Extract the state and market from the following location string. "
+        "Reply in the format: Market: <market>, State: <state>"
+    )
+    user = f"Location: {location}"
+    resp = await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])
+
+    # Parse response for market and state
+    match = re.search(r"Market:\s*([^\n,]+).*State:\s*([^\n,]+)", resp.content)
+    if match:
+        market_name, state_name = match.groups()
+    else:
+        market_name, state_name = "chennai", "Tamil nadu"  # fallback
+
+    price_data = await get_agri_market_price(crop, state_name.strip(), market_name.strip())
+    return {"market_price": price_data, **_trace("market_price")}
+
+def format_market_price(market_price: Dict[str, Any]) -> str:
+    """
+    Formats the latest market price info for the LLM prompt.
+    """
+    data = market_price.get("data", [])
+    if not data:
+        return "Market price data not available."
+    latest = data[0]
+    return (
+        f"Latest market price for {latest['Commodity']} in {latest['Market']} ({latest['Date']}):\n"
+        f"Min Price: ₹{latest['Min Price']}, Max Price: ₹{latest['Max Price']}, Modal Price: ₹{latest['Modal Price']}"
+    )
 
 async def lifecycle_planning_node(state: State) -> State:
     profile = state.get("profile", {})
     crops = profile.get("crops", [])
     crop = crops[0] if crops else "unknown crop"
     weather = state.get("weather", {})
-
     sys = "You prepare seasonal crop operation plans."
     user = (
         f"Crop: {crop}\n"
@@ -129,33 +152,35 @@ async def lifecycle_planning_node(state: State) -> State:
         "Output: near-term 2-4 week plan (sow/fertilize/irrigate/spray/harvest cues)."
     )
     resp = await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])
-    state["plan"] = resp.content
-    return _append_trace(state, "plan")
-
-
+    return {"plan": resp.content, **_trace("plan")}
 
 async def response_synthesizer_node(state: State) -> State:
     msg = state["message"]
+    intent = state.get("intent", "")
     profile = state.get("profile", {})
-    parts = {
-        "History": state.get("history_summary", ""),
-        "Crop health": state.get("crop_analysis", ""),
-        "Disease": state.get("disease_risk", ""),
-        "Plan": state.get("plan", ""),
-        "Weather": str(state.get("weather", "")),
-        "Sensors": str(state.get("sensors", "")),
-    }
-    sys = "Farmer-facing assistant. Concise bullets and a final Action line."
+    market_price_info = format_market_price(state.get("market_price", {}))
+
+    # Build context parts based on intent
+    parts = {}
+    if "market" in intent or "price" in intent:
+        parts["Market price"] = market_price_info
+    if "health" in intent or "status" in intent:
+        parts["Crop health"] = state.get("crop_analysis", "")
+    if "disease" in intent:
+        parts["Disease"] = state.get("disease_risk", "")
+    if "plan" in intent:
+        parts["Plan"] = state.get("plan", "")
+    # Always include history, weather, sensors if you want
+
+    sys = "Farmer-facing assistant. Reply concisely and only about the user's query. If the user asks about market price, do not include crop health alerts."
     user = f"User query: {msg}\nFarmer profile: {profile}\nContext parts: {parts}\n<= 180 words."
     resp = await llm.ainvoke([SystemMessage(content=sys), HumanMessage(content=user)])
-    state["final_response"] = resp.content
-    # save turn with session_id
-    await save_chat_turn(state["user_id"], state["session_id"], msg, state["final_response"])
-    return _append_trace(state, "final")
-
+    final = resp.content
+    final_cleaned = clean_response(final)
+    await save_chat_turn(state["user_id"], state["session_id"], msg, final_cleaned)
+    return {"final_response": final_cleaned, **_trace("final")}
 
 # ------------ Build and run the graph ------------
-
 def _build_graph():
     g = StateGraph(State)
     g.add_node("chat_history", chat_history_node)
@@ -167,11 +192,14 @@ def _build_graph():
     g.add_node("disease_prediction", disease_prediction_node)
     g.add_node("lifecycle_planning", lifecycle_planning_node)
     g.add_node("response", response_synthesizer_node)
+    g.add_node("agmarket_price", agmarket_price_node)
 
     g.set_entry_point("chat_history")
     g.add_edge("chat_history", "farmer_interaction")
     g.add_edge("farmer_interaction", "farmer_profile")
     g.add_edge("farmer_profile", "sensor_data")
+    g.add_edge("farmer_profile", "agmarket_price")
+    g.add_edge("agmarket_price", "sensor_data")
     g.add_edge("farmer_profile", "weather")
     g.add_edge("sensor_data", "crop_health")
     g.add_edge("sensor_data", "disease_prediction")
@@ -187,5 +215,10 @@ _compiled_graph = _build_graph()
 
 async def run_langgraph_workflow(user_id: str, session_id: str, message: str) -> str:
     initial: State = {"user_id": user_id, "session_id": session_id, "message": message, "trace": []}
-    result: State = await _compiled_graph.ainvoke(initial)
-    return result.get("final_response", "Sorry, something went wrong.")
+    try:
+        result: State = await _compiled_graph.ainvoke(initial)
+        print("Trace:", result.get("trace"))
+        return result.get("final_response", "Sorry, something went wrong.")
+    except Exception as e:
+        print("Graph execution failed:", e)
+        return f"Error: {e}"
