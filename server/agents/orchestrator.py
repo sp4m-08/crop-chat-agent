@@ -76,9 +76,21 @@ async def sensor_data_node(state: State) -> State:
     return {"sensors": sensors, **_trace("sensors")}
 
 async def weather_node(state: State) -> State:
-    location = (state.get("profile") or {}).get("location", "Unknown")
+    """
+    Gets location from user query if present, else uses profile location.
+    """
+    profile = state.get("profile", {})
+    # Try to extract location from user query using LLM
+    location_prompt = [
+       SystemMessage(content="Extract the city name from the following user message. If the user asks about a city other than the registered location, reply with that city name. If none, reply 'none'."),
+        HumanMessage(content=state["message"])
+    ]
+    location_resp = await llm.ainvoke(location_prompt)
+    location_query = location_resp.content.strip()
+    location = location_query if location_query.lower() != "none" else profile.get("location", "")
+
     weather = await get_local_weather(location)
-    return {"weather": weather, **_trace("weather")}
+    return {"weather": weather, **_trace(f"weather for {location}")}
 
 async def crop_health_node(state: State) -> State:
     profile = state.get("profile", {})
