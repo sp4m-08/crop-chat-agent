@@ -1,49 +1,75 @@
-### Project Documentation: The LLM Multi-Agent Crop/Farmer Chatbot
+# Crop Chat Agent
 
-This document provides a comprehensive overview of the `Crop-Chatbot` project, a multi-agent system designed to assist farmers by analyzing sensor data and providing actionable agricultural advice.
+An LLM-powered assistant for farmers that answers questions about market prices, weather, crop health, disease risk, and short‑term planning. Backend is FastAPI + LangGraph; data is fetched from OpenWeather and AgMarket APIs.
 
-This project is built using a **FastAPI** backend that hosts a team of specialized AI agents. This backend is designed to be a service layer, meaning it can be called by any client, such as a web application, a mobile app, or a separate Express.js server.
+Live frontend
+- https://sih-crop-frontend-sigma.vercel.app/
 
----
+## Features
+- Multi-intent routing: market, weather, health, disease, plan (supports combined queries)
+- Location and crop taken from user message with fallback to profile
+- Agri market prices via AgMarket API
+- Weather: current + 5‑day/3‑hour forecast via OpenWeather
+- Sensor-aware crop health and disease risk (LLM + tools)
+- In‑memory chat history (no database required)
+- Clean, farmer-friendly responses (response cleaner + formatters)
 
-### 1. The Multi-Agent Architecture
+## Architecture
+- Orchestrator (LangGraph): `server/agents/orchestrator.py`
+  - Nodes (return deltas only; no in-place mutation):
+    - chat_history: load & summarize past turns
+    - farmer_interaction: detect multiple intents, extract crop from query
+    - farmer_profile: load farmer profile (stub/dummy)
+    - agmarket_price: extract location (query > profile), fetch mandi price
+    - weather: extract location (query > profile), fetch current + 5‑day forecast
+    - sensor_data: latest sensor readings (stub/dummy)
+    - crop_health: agronomy advice from sensors + context
+    - disease_prediction: near‑term disease risks
+    - lifecycle_planning: short‑term operational plan
+    - response: synthesize final answer using only relevant parts
+- Tools
+  - `weather_tool.py`: OpenWeather client + formatter
+  - `market_tool.py`: AgMarket client
+  - `history_tool.py`: in‑memory chat history
+  - `profile_tool.py`, `sensor_tool.py`: stubs for now
+- Utilities
+  - `response_cleaner.py`: `clean_response`, `format_market_price`, `format_weather`
+- LLM config
+  - `server/agents/agent_roles.py` (uses Gemini via API key)
 
-The core intelligence of this project is a **multi-agent system** powered by the **CrewAI** framework. This system operates as a team of experts, each with a specific role and access to unique tools. Instead of a single LLM trying to solve everything, the task is broken down and delegated to the most suitable agent, leading to more accurate and reliable responses.
+## Project structure
+- server/
+  - main.py — FastAPI app
+  - routes/
+    - chat.py — POST /chat endpoint
+  - agents/
+    - orchestrator.py — LangGraph graph and nodes
+    - agent_roles.py — LLM setup (Gemini)
+    - tools/
+      - weather_tool.py — OpenWeather current + 5‑day forecast + formatter
+      - market_tool.py — AgMarket API client
+      - profile_tool.py — profile provider (stub)
+      - sensor_tool.py — sensor provider (stub)
+      - history_tool.py — in‑memory chat history
+  - utils/
+    - response_cleaner.py — cleaners/formatters
+- requirements.txt
+- .env
 
-Here's how the team works:
+Ensure each package folder (server/, routes/, agents/, tools/, utils/) contains `__init__.py`.
 
-- **Farmer Interaction Agent**: This is the "manager" of the crew. Its primary job is to communicate with the farmer in a friendly, conversational tone. It receives the farmer's queries and, based on the complexity, delegates sub-tasks to the other agents. It then synthesizes all the information from the team into a single, comprehensive response.
+## Requirements
+- Python 3.10+
+- API keys:
+  - Google Gemini (LLM)
+  - OpenWeather (free 5‑day/3‑hour forecast)
 
-- **Sensor Data Ingestion Agent**: This is the data expert. Its sole responsibility is to fetch the latest sensor readings (temperature, humidity, soil moisture, etc.). It uses a specialized **tool** to retrieve this data and provides the raw information to the other agents.
 
-- **Crop Health Analyst**: This agent is the agronomist. Its role is to analyze the raw sensor data provided by the Data Ingestion Agent and compare it to the ideal growing conditions for a specific crop. It uses a **tool** to access a knowledge base of agricultural requirements and identifies any potential issues.
 
-- **Weather Forecaster**: This agent is the meteorologist. It uses a **tool** to get the current weather and a short-term forecast for the farm's location. This information is crucial for providing contextual advice, such as suggesting irrigation or harvest plans.
+## Setup (Windows)
+1) Create and activate a virtual environment, install dependencies:
+````bash
+py -m venv .venv
+[activate](http://_vscodecontentref_/0)
+pip install -r [requirements.txt](http://_vscodecontentref_/1)
 
----
-
-### 2. The File Structure and Its Purpose
-
-The project is organized into a modular structure to ensure maintainability and scalability. Each file and directory has a clear purpose.
-
-- **`fastapi_app/`**: This is the root of your Python application.
-- **`main.py`**: The application's entry point. It creates the FastAPI instance and includes the API routes, acting as the central hub of your backend.
-- **`routes/`**: This directory contains all of your API endpoints.
-  - `chat.py`: Defines the `/chat` endpoint. This is the only endpoint exposed to your Express.js front end. It receives chat messages, triggers the agent crew, and returns the response.
-- **`models/`**: This is where you define **Pydantic** models.
-  - `sensor_data.py`: A Pydantic model for validating the structure of incoming sensor data.
-- **`agents/`**: This is the heart of your multi-agent system.
-  - `agent_roles.py`: Defines each of the specialized agents, their goals, backstories, and the **tools** they can use. This is where you will add your code to connect to real data sources like AWS IoT.
-  - `orchestrator.py`: Orchestrates the communication and collaboration between the agents. It defines the sequence of tasks and kicks off the entire process.
-- **`requirements.txt`**: A simple text file that lists all the necessary Python libraries for your project.
-- **`venv/`**: The Python virtual environment. It isolates your project's dependencies from other projects on your computer.
-
----
-
-### 3. Key Concepts Explained
-
-- **FastAPI**: A modern, high-performance web framework for building APIs with Python. It's a perfect choice for the backend because it's fast, easy to use, and comes with automatic interactive API documentation.
-- **CrewAI**: The framework for building and running your multi-agent system. It allows you to create a "crew" of agents and have them work together to solve complex problems.
-- **Pydantic**: A library for data validation. In your project, it ensures that data sent to and received from your agents and API endpoints has a consistent structure.
-- **LLM (Gemini API)**: The large language model is the "brain" for each of your agents. The CrewAI framework uses the LLM to power the agents' reasoning and decision-making abilities. You pass your Gemini API key to CrewAI, which handles all communication with the LLM.
-- **Tools**: These are specialized functions or APIs that an agent can call. They are what ground the LLM in real-world data and actions. For example, your `get_latest_sensor_data` tool connects the LLM to your hardware sensors via AWS.
